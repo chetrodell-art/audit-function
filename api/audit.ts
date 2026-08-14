@@ -13,12 +13,12 @@
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
- *   Framework Digital_API_KEY       = pit-...     (from your CRM: Settings → API → API Key)
+ *   Framework Digital_API_KEY       = pit-...     (from your CRM: Settings -> API -> API Key)
  */
 
 export const config = { maxDuration: 60 };
 
-// ─── Types ───────────────────────────────────────────────────────────
+// --- Types ---
 interface AuditRequest {
   contactId?: string;
   firstName: string;
@@ -28,7 +28,7 @@ interface AuditRequest {
   website: string;
 }
 
-// ─── Helper: fetch with timeout ──────────────────────────────────────
+// --- Helper: fetch with timeout ---
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 15000): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -42,7 +42,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-// ─── Step 1: Fetch page HTML — all 3 proxies tried in parallel ───────
+// --- Step 1: Fetch page HTML — all 3 proxies tried in parallel ---
 async function fetchPageHtml(target: string): Promise<string | null> {
   const proxies = [
     `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
@@ -63,7 +63,7 @@ async function fetchPageHtml(target: string): Promise<string | null> {
   }
 }
 
-// ─── Step 2: Fetch Google PageSpeed Insights data (free, no key) ─────
+// --- Step 2: Fetch Google PageSpeed Insights data ---
 async function fetchPageSpeedData(target: string): Promise<any | null> {
   const psiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(target)}&strategy=mobile&category=PERFORMANCE&category=SEO&category=BEST_PRACTICES&category=ACCESSIBILITY`;
   try {
@@ -74,7 +74,7 @@ async function fetchPageSpeedData(target: string): Promise<any | null> {
   return null;
 }
 
-// ─── Step 3: Claude system prompt ────────────────────────────────────
+// --- Step 3: Claude system prompt ---
 const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores, page HTML, or just the URL. Work with whatever you have and provide the most useful analysis possible.
 
 Your report must be well-structured, professional, and easy for a non-technical business owner to understand. Include:
@@ -92,7 +92,7 @@ Rules:
 - Write in clear, professional language a business owner would understand.
 - Format as clean markdown with headers and bullet points.`;
 
-// ─── Step 4: Call Claude API ─────────────────────────────────────────
+// --- Step 4: Call Claude API ---
 async function callClaude(target: string, pageSpeed: any | null, html: string | null): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
@@ -148,14 +148,14 @@ ${Object.entries(pageSpeed.audits || {})
   return text;
 }
 
-// ─── Step 5: Post audit as a CRM note ────────────────────────────────
+// --- Step 5: Post audit as a CRM note ---
 const CRM_API_BASE = 'https://services.leadconnectorhq.com';
 
 async function addNoteToContact(contactId: string, auditReport: string, firstName: string, website: string): Promise<void> {
   const apiKey = process.env.Framework Digital_API_KEY;
   if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
 
-  const noteBody = `🔍 AI Website Audit Report — ${website}\n\n${auditReport}\n\n---\nGenerated automatically by Framework Digital's AI audit system for ${firstName}.`;
+  const noteBody = `AI Website Audit Report — ${website}\n\n${auditReport}\n\n---\nGenerated automatically by Framework Digital's AI audit system for ${firstName}.`;
 
   const response = await fetchWithTimeout(
     `${CRM_API_BASE}/contacts/${contactId}/notes`,
@@ -177,7 +177,7 @@ async function addNoteToContact(contactId: string, auditReport: string, firstNam
   }
 }
 
-// ─── Step 6: Apply audit-complete tag ────────────────────────────────
+// --- Step 6: Apply audit-complete tag ---
 async function addTagToContact(contactId: string, tag: string): Promise<void> {
   const apiKey = process.env.Framework Digital_API_KEY;
   if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
@@ -202,7 +202,7 @@ async function addTagToContact(contactId: string, tag: string): Promise<void> {
   }
 }
 
-// ─── Step 7: Create CRM contact (if no contactId provided) ───────────
+// --- Step 7: Create CRM contact (if no contactId provided) ---
 async function createCRMContact(data: { firstName: string; lastName?: string; email: string; phone?: string; website: string }): Promise<string> {
   const apiKey = process.env.Framework Digital_API_KEY;
   if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
@@ -239,7 +239,7 @@ async function createCRMContact(data: { firstName: string; lastName?: string; em
   return contactId;
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────
+// --- Main handler ---
 export default async function handler(req: Request): Promise<Response> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': '*',
@@ -283,7 +283,6 @@ export default async function handler(req: Request): Promise<Response> {
 
     console.log(`[Audit] Starting audit for ${firstName} — ${target}`);
 
-    // Both are optional — always proceeds regardless of outcome
     const [html, pageSpeed] = await Promise.all([
       fetchPageHtml(target),
       fetchPageSpeedData(target),
