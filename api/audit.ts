@@ -19,26 +19,36 @@ async function callClaude(target: string): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1500,
-      system: 'You are a senior SEO and web performance consultant. Audit the given website URL using your general knowledge. Include: Executive Summary, Performance Scores (estimated), Key Issues, Recommendations, Conversion Opportunities. Be specific and honest. Use clean markdown.',
-      messages: [{ role: 'user', content: `Perform a full website audit for: ${target}` }],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
-  if (!response.ok) throw new Error(`Claude error ${response.status}: ${await response.text()}`);
-  const data = await response.json();
-  const text = data?.content?.[0]?.text;
-  if (!text) throw new Error('Empty response from Claude');
-  return text;
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 800,
+        system: 'You are a senior SEO and web performance consultant. Audit the given website URL using your general knowledge. Include: Executive Summary, Performance Scores (estimated), Key Issues, Recommendations, Conversion Opportunities. Be specific and honest. Use clean markdown. Be concise.',
+        messages: [{ role: 'user', content: `Perform a website audit for: ${target}` }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error(`Claude error ${response.status}: ${await response.text()}`);
+    const data = await response.json();
+    const text = data?.content?.[0]?.text;
+    if (!text) throw new Error('Empty response from Claude');
+    return text;
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error('Claude timed out after 25s');
+    throw err;
+  }
 }
 
 const CRM_BASE = 'https://services.leadconnectorhq.com';
@@ -114,18 +124,18 @@ export default async function handler(req: Request): Promise<Response> {
     let target = website.trim();
     if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
-    console.log(`[Audit] Starting Claude for ${target}`);
+    console.log(`[Audit] Calling Claude for ${target}`);
     const report = await callClaude(target);
     console.log(`[Audit] Claude done (${report.length} chars)`);
 
     await addNoteToContact(contactId, report, firstName, target);
     await addTagToContact(contactId, 'audit-complete');
-    console.log('[Audit] Done.');
+    console.log('[Audit] Complete.');
 
     return new Response(JSON.stringify({ success: true, contactId, website: target }), { status: 200, headers });
 
   } catch (error: any) {
-    console.error('[Audit]', error.message);
+    console.error('[Audit] ERROR:', error.message);
     return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers });
   }
 }
