@@ -20,7 +20,7 @@ async function callClaude(target: string): Promise<{ summaryHtml: string; fullRe
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const timeout = setTimeout(() => controller.abort(), 45000);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -62,7 +62,7 @@ Full detailed audit in clean markdown. Include: Executive Summary, Performance S
     return { summaryHtml, fullReport };
   } catch (err: any) {
     clearTimeout(timeout);
-    if (err.name === 'AbortError') throw new Error('Claude timed out after 25s');
+    if (err.name === 'AbortError') throw new Error('Claude timed out after 45s');
     throw err;
   }
 }
