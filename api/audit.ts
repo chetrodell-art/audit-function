@@ -2,14 +2,15 @@
  * Serverless Function: Claude-Powered Website Audit (Standalone)
  *
  * Flow:
- *   1. Receives { contactId, firstName, email, website } via POST
- *   2. Fetches the website's HTML (GET request through CORS proxy)
- *   3. Calls Google PageSpeed Insights API (free, no key needed)
- *   4. Sends HTML + PageSpeed data to Claude (Anthropic API) with ANTHROPIC_API_KEY
- *   5. Takes Claude's response and POSTs it to the CRM as a note on the contact
+ *   1. Receives { contactId?, firstName, lastName?, email, phone?, website } via POST
+ *   2. If no contactId, creates a CRM contact using GHL_API_KEY
+ *   3. Fetches the website's HTML (GET request through CORS proxy)
+ *   4. Calls Google PageSpeed Insights API (free, no key needed)
+ *   5. Sends HTML + PageSpeed data to Claude (Anthropic API) with ANTHROPIC_API_KEY
+ *   6. Takes Claude's response and POSTs it to the CRM as a note on the contact
  *      using contactId and GHL_API_KEY
- *   6. Applies the "audit-complete" tag to the CRM contact
- *   7. Returns 200 success
+ *   7. Applies the "audit-complete" tag to the CRM contact
+ *   8. Returns 200 success
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
@@ -20,9 +21,11 @@ export const config = { runtime: 'edge' };
 
 // ─── Types ───────────────────────────────────────────────────────────
 interface AuditRequest {
-  contactId: string;
+  contactId?: string;
   firstName: string;
+  lastName?: string;
   email: string;
+  phone?: string;
   website: string;
 }
 
@@ -163,11 +166,7 @@ async function addNoteToContact(contactId: string, auditReport: string, firstNam
 
 ${auditReport}
 
-
-
-***
-
-
+---
 This audit was generated automatically by Framework Digital's AI audit system for ${firstName}.`;
 
   const response = await fetchWithTimeout(
@@ -219,6 +218,42 @@ async function addTagToContact(contactId: string, tag: string): Promise<void> {
   }
 }
 
+// ─── Step 7: Create a CRM contact (if no contactId provided) ─────────
+async function createCRMContact(data: { firstName: string; lastName?: string; email: string; phone?: string; website: string }): Promise<string> {
+  const apiKey = process.env.GHL_API_KEY;
+  if (!apiKey) throw new Error('GHL_API_KEY environment variable is not set');
+
+  const response = await fetchWithTimeout(
+    `${CRM_API_BASE}/contacts/`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Version': '2021-07-28',
+      },
+      body: JSON.stringify({
+        firstName: data.firstName,
+        lastName: data.lastName || '',
+        email: data.email,
+        phone: data.phone || '',
+        website: data.website,
+      }),
+    },
+    15000
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`CRM contact creation failed ${response.status}: ${errText}`);
+  }
+
+  const result = await response.json();
+  const contactId = result?.contact?.id || result?.id;
+  if (!contactId) throw new Error('CRM contact creation succeeded but no contactId was returned');
+  return contactId;
+}
+
 // ─── Main handler (Vercel Edge Function) ──────────────────────────────
 export default async function handler(req: Request): Promise<Response> {
   const headers: Record<string, string> = {
@@ -246,13 +281,21 @@ export default async function handler(req: Request): Promise<Response> {
       return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body' }), { status: 400, headers });
     }
 
-    const { contactId, firstName, email, website } = body;
+    const { contactId: passedContactId, firstName, lastName, email, phone, website } = body;
 
-    if (!contactId || !website) {
+    if (!website || !email) {
       return new Response(JSON.stringify({
         success: false,
-        error: 'contactId and website are required',
+        error: 'email and website are required',
       }), { status: 400, headers });
+    }
+
+    // Create a CRM contact if no contactId was provided, otherwise use the passed one
+    let contactId = passedContactId;
+    if (!contactId) {
+      console.log(`[Audit] No contactId provided — creating CRM contact for ${firstName} (${email})...`);
+      contactId = await createCRMContact({ firstName, lastName, email, phone, website });
+      console.log(`[Audit] CRM contact created: ${contactId}`);
     }
 
     console.log(`[Audit] Starting audit for ${firstName} (${email}) — website: ${website}`);
@@ -304,3 +347,6 @@ export default async function handler(req: Request): Promise<Response> {
     }), { status: 500, headers });
   }
 }
+```
+
+That's the complete 349-line file — every line included, nothing collapsed.
