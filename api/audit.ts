@@ -4,12 +4,11 @@
  * Flow:
  *   1. Receives { contactId?, firstName, lastName?, email, phone?, website } via POST
  *   2. If no contactId, creates a CRM contact
- *   3. Attempts to fetch website HTML in parallel across 3 proxies (optional)
- *   4. Attempts Google PageSpeed Insights API (optional)
- *   5. Sends whatever data is available to Claude — always proceeds
- *   6. Posts Claude's report as a note on the CRM contact
- *   7. Applies the "audit-complete" tag to the contact
- *   8. Returns 200 success
+ *   3. Attempts Google PageSpeed Insights API (optional)
+ *   4. Sends data to Claude — always proceeds even if PageSpeed fails
+ *   5. Posts Claude's report as a note on the CRM contact
+ *   6. Applies the "audit-complete" tag to the contact
+ *   7. Returns 200 success
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
@@ -40,48 +39,28 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-async function fetchPageHtml(target: string): Promise<string | null> {
-  const proxies = [
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
-    `https://corsproxy.io/?url=${encodeURIComponent(target)}`,
-    `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(target)}`,
-  ];
-  try {
-    return await Promise.any(
-      proxies.map(async (proxy) => {
-        const res = await fetchWithTimeout(proxy, {}, 10000);
-        const html = await res.text();
-        if (!html || html.length < 200) throw new Error('Too short');
-        return html;
-      })
-    );
-  } catch {
-    return null;
-  }
-}
-
 async function fetchPageSpeedData(target: string): Promise<any | null> {
   const psiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(target)}&strategy=mobile&category=PERFORMANCE&category=SEO&category=BEST_PRACTICES&category=ACCESSIBILITY`;
   try {
-    const res = await fetchWithTimeout(psiUrl, {}, 25000);
+    const res = await fetchWithTimeout(psiUrl, {}, 15000);
     const data = await res.json();
     if (data?.lighthouseResult && !data?.error) return data.lighthouseResult;
   } catch {}
   return null;
 }
 
-const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores, page HTML, or just the URL. Work with whatever you have.
+const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores or just the URL. Work with whatever you have.
 
 Include:
 1. Executive Summary — 2-3 sentences on overall health and biggest opportunities.
-2. Performance Scores — speed, SEO, best practices, accessibility (0-100). Use PageSpeed data if available; estimate from HTML if not; use general knowledge if only URL available.
+2. Performance Scores — speed, SEO, best practices, accessibility (0-100). Use PageSpeed data if available; use general knowledge if only URL available.
 3. Key Issues — 5-10 issues ordered by severity (high/medium/low).
 4. Recommendations — 5-8 concrete, actionable items.
 5. Conversion Opportunities — where the site could better capture leads or book appointments.
 
 Rules: never refuse due to limited data. Be honest and specific. Write for a non-technical business owner. Use clean markdown.`;
 
-async function callClaude(target: string, pageSpeed: any | null, html: string | null): Promise<string> {
+async function callClaude(target: string, pageSpeed: any | null): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
@@ -98,13 +77,9 @@ ${Object.entries(pageSpeed.audits || {})
   .slice(0, 15)
   .map(([, a]: any) => `- ${a.title}: ${Math.round((a.score ?? 0) * 100)}/100${a.numericValue ? ` (${a.displayValue || a.numericValue})` : ''}`)
   .join('\n')}`
-    : 'PageSpeed data unavailable. Analyze from HTML and general knowledge.';
+    : 'PageSpeed data unavailable. Audit based on URL and general best practices.';
 
-  const htmlSnippet = html
-    ? `Page HTML (first 8000 chars):\n\`\`\`html\n${html.slice(0, 8000)}\n\`\`\``
-    : 'HTML unavailable. Audit based on URL and general best practices.';
-
-  const userMessage = `Audit this website: ${target}\n\n${lhScores}\n\n${htmlSnippet}\n\nProvide the full report now.`;
+  const userMessage = `Audit this website: ${target}\n\n${lhScores}\n\nProvide the full report now.`;
 
   const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -204,10 +179,10 @@ export default async function handler(req: Request): Promise<Response> {
     if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
     console.log(`[Audit] Starting for ${target}`);
-    const [html, pageSpeed] = await Promise.all([fetchPageHtml(target), fetchPageSpeedData(target)]);
-    console.log(`[Audit] HTML: ${html ? 'yes' : 'no'} | PageSpeed: ${pageSpeed ? 'yes' : 'no'}`);
+    const pageSpeed = await fetchPageSpeedData(target);
+    console.log(`[Audit] PageSpeed: ${pageSpeed ? 'yes' : 'no'}`);
 
-    const report = await callClaude(target, pageSpeed, html);
+    const report = await callClaude(target, pageSpeed);
     console.log(`[Audit] Claude done (${report.length} chars)`);
 
     await addNoteToContact(contactId, report, firstName, target);
