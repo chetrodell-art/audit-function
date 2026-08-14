@@ -1,0 +1,8 @@
+{
+  "devDependencies": { "vercel": "^37.0.0" },
+  "name": "framework-digital-audit-api",
+  "private": true,
+  "scripts": { "dev": "vercel dev" },
+  "type": "module",
+  "version": "1.0.0"
+}
