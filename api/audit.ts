@@ -15,7 +15,7 @@ interface AuditRequest {
   website: string;
 }
 
-async function callClaude(target: string): Promise<{ summary: string; fullReport: string }> {
+async function callClaude(target: string): Promise<{ summaryHtml: string; fullReport: string }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
@@ -35,10 +35,10 @@ async function callClaude(target: string): Promise<{ summary: string; fullReport
         max_tokens: 1200,
         system: `You are a senior SEO and web performance consultant auditing a website for a potential client.
 
-Return your response in EXACTLY this format with both sections:
+Return your response in EXACTLY this format:
 
 ===EMAIL_SUMMARY===
-Write 4-5 bullet points covering the most important findings and one key recommendation each. Keep it friendly, specific, and under 250 words. Written for a business owner, not a developer.
+Write 4-5 findings as HTML using ONLY <ul> and <li> tags. Each <li> should have a bold finding title followed by one specific recommendation. Friendly tone, written for a business owner. No extra HTML tags, no styling attributes.
 
 ===FULL_REPORT===
 Full detailed audit in clean markdown. Include: Executive Summary, Performance Scores (estimated), Key Issues (5-8 ordered by severity), Recommendations (5-8 actionable items), Conversion Opportunities.`,
@@ -56,10 +56,10 @@ Full detailed audit in clean markdown. Include: Executive Summary, Performance S
     const summaryMatch = raw.match(/===EMAIL_SUMMARY===([\s\S]*?)===FULL_REPORT===/);
     const fullMatch = raw.match(/===FULL_REPORT===([\s\S]*)/);
 
-    const summary = summaryMatch?.[1]?.trim() ?? raw;
+    const summaryHtml = summaryMatch?.[1]?.trim() ?? '<ul><li>Audit complete — see full report in your CRM notes.</li></ul>';
     const fullReport = fullMatch?.[1]?.trim() ?? raw;
 
-    return { summary, fullReport };
+    return { summaryHtml, fullReport };
   } catch (err: any) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') throw new Error('Claude timed out after 25s');
@@ -69,6 +69,50 @@ Full detailed audit in clean markdown. Include: Executive Summary, Performance S
 
 const CRM_BASE = 'https://services.leadconnectorhq.com';
 const AUDIT_SUMMARY_FIELD_ID = 'BWWIBWHOzsF67mN1IjJJ';
+const BOOKING_LINK = 'https://api.leadconnectorhq.com/widget/booking/bookwithuswebdesign-fb89806c-32ca-4c6c-adb0-2b1e3b824fe3';
+
+async function sendAuditEmail(contactId: string, firstName: string, website: string, summaryHtml: string): Promise<void> {
+  const key = process.env.CRM_API_KEY;
+  if (!key) throw new Error('CRM_API_KEY not set');
+
+  const html = `
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333; line-height: 1.6;">
+  <p>Hi ${firstName},</p>
+  <p>Your free website audit for ${website} is ready — here's a summary of what we found:</p>
+  ${summaryHtml}
+  <hr style="border: none; border-top: 1px solid #eee; margin: 28px 0;">
+  <p>Our solutions are unique to each client, so we like to go over the findings in more depth and ask you questions about your business to find ways we can help.</p>
+  <p><strong>Book a free 30-minute strategy call here, it's free:</strong></p>
+  <p>
+    <a href="${BOOKING_LINK}"
+       style="display: inline-block; background: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+      Book My Free Strategy Call
+    </a>
+  </p>
+  <p>Even if you don't decide to work with us, the call will help your business.</p>
+  <br>
+  <p>Talk soon,<br>
+  <strong>The Framework Digital Team</strong><br>
+  <a href="https://www.frameworkdigitaldesign.com" style="color: #2563eb;">frameworkdigitaldesign.com</a></p>
+</div>`;
+
+  const res = await fetch(`${CRM_BASE}/conversations/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${key}`,
+      'Version': '2021-07-28',
+    },
+    body: JSON.stringify({
+      type: 'Email',
+      contactId,
+      subject: 'Your Free Website Audit is Ready',
+      html,
+      status: 'sent',
+    }),
+  });
+  if (!res.ok) throw new Error(`Email send failed ${res.status}: ${await res.text()}`);
+}
 
 async function addNoteToContact(contactId: string, report: string, firstName: string, website: string): Promise<void> {
   const key = process.env.CRM_API_KEY;
@@ -81,15 +125,13 @@ async function addNoteToContact(contactId: string, report: string, firstName: st
   if (!res.ok) throw new Error(`Note failed ${res.status}: ${await res.text()}`);
 }
 
-async function updateContactSummaryField(contactId: string, summary: string): Promise<void> {
+async function updateContactSummaryField(contactId: string, summaryHtml: string): Promise<void> {
   const key = process.env.CRM_API_KEY;
   if (!key) throw new Error('CRM_API_KEY not set');
   const res = await fetch(`${CRM_BASE}/contacts/${contactId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, 'Version': '2021-07-28' },
-    body: JSON.stringify({
-      customFields: [{ id: AUDIT_SUMMARY_FIELD_ID, value: summary }],
-    }),
+    body: JSON.stringify({ customFields: [{ id: AUDIT_SUMMARY_FIELD_ID, value: summaryHtml }] }),
   });
   if (!res.ok) throw new Error(`Custom field update failed ${res.status}: ${await res.text()}`);
 }
@@ -156,11 +198,12 @@ export async function POST(req: Request): Promise<Response> {
     if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
     console.log(`[Audit] Calling Claude for ${target}`);
-    const { summary, fullReport } = await callClaude(target);
-    console.log(`[Audit] Claude done — summary: ${summary.length} chars, report: ${fullReport.length} chars`);
+    const { summaryHtml, fullReport } = await callClaude(target);
+    console.log(`[Audit] Claude done — summary: ${summaryHtml.length} chars, report: ${fullReport.length} chars`);
 
     await addNoteToContact(contactId, fullReport, firstName, target);
-    await updateContactSummaryField(contactId, summary);
+    await updateContactSummaryField(contactId, summaryHtml);
+    await sendAuditEmail(contactId, firstName, target, summaryHtml);
     await addTagToContact(contactId, 'audit-complete');
     console.log('[Audit] Complete.');
 
@@ -170,4 +213,3 @@ export async function POST(req: Request): Promise<Response> {
     console.error('[Audit] ERROR:', error.message);
     return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: corsHeaders });
   }
-}
