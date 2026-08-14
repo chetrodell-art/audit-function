@@ -17,7 +17,7 @@
  *   GHL_API_KEY       = pit-...     (from your CRM: Settings → API → API Key)
  */
 
-export const config = { runtime: 'edge' };
+export const config = { maxDuration: 60 };
 
 // ─── Types ───────────────────────────────────────────────────────────
 interface AuditRequest {
