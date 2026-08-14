@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/audit.ts": { "runtime": "@vercel/edge" }
+  },
+  "routes": [
+    { "dest": "/api/audit", "src": "/api/audit" }
+  ],
+  "version": 2
+}
