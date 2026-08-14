@@ -115,11 +115,11 @@ ${Object.entries(pageSpeed.audits || {})
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 4000,
+      max_tokens: 1500,
       system: AUDIT_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userMessage }],
     }),
-  }, 30000);
+  }, 20000);
 
   if (!response.ok) throw new Error(`Claude error ${response.status}: ${await response.text()}`);
   const data = await response.json();
