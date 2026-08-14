@@ -8,7 +8,8 @@
  *   4. Sends HTML + PageSpeed data to Claude (Anthropic API) with ANTHROPIC_API_KEY
  *   5. Takes Claude's response and POSTs it to the CRM as a note on the contact
  *      using contactId and GHL_API_KEY
- *   6. Returns 200 success
+ *   6. Applies the "audit-complete" tag to the CRM contact
+ *   7. Returns 200 success
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
@@ -191,6 +192,33 @@ This audit was generated automatically by Framework Digital's AI audit system fo
   }
 }
 
+// ─── Step 6: Apply the "audit-complete" tag to the CRM contact ───────
+async function addTagToContact(contactId: string, tag: string): Promise<void> {
+  const apiKey = process.env.GHL_API_KEY;
+  if (!apiKey) throw new Error('GHL_API_KEY environment variable is not set');
+
+  const response = await fetchWithTimeout(
+    `${CRM_API_BASE}/contacts/${contactId}/tags`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Version': '2021-07-28',
+      },
+      body: JSON.stringify({
+        tags: [tag],
+      }),
+    },
+    15000
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`CRM tag application failed ${response.status}: ${errText}`);
+  }
+}
+
 // ─── Main handler (Vercel Edge Function) ──────────────────────────────
 export default async function handler(req: Request): Promise<Response> {
   const headers: Record<string, string> = {
@@ -255,6 +283,11 @@ export default async function handler(req: Request): Promise<Response> {
     console.log(`[Audit] Posting audit note to CRM contact ${contactId}...`);
     await addNoteToContact(contactId, auditReport, firstName, target);
     console.log('[Audit] Note posted to CRM successfully.');
+
+    // Apply the "audit-complete" tag to the contact
+    console.log(`[Audit] Applying "audit-complete" tag to contact ${contactId}...`);
+    await addTagToContact(contactId, 'audit-complete');
+    console.log('[Audit] Tag applied successfully.');
 
     return new Response(JSON.stringify({
       success: true,
