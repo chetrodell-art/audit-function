@@ -1,9 +1,9 @@
 /**
- * Serverless Function: Claude-Powered Website Audit (Standalone)
+ * Serverless Function: Claude-Powered Website Audit
  *
  * Flow:
  *   1. Receives { contactId?, firstName, lastName?, email, phone?, website } via POST
- *   2. If no contactId, creates a CRM contact using Framework Digital_API_KEY
+ *   2. If no contactId, creates a CRM contact
  *   3. Attempts to fetch website HTML in parallel across 3 proxies (optional)
  *   4. Attempts Google PageSpeed Insights API (optional)
  *   5. Sends whatever data is available to Claude — always proceeds
@@ -13,12 +13,11 @@
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
- *   Framework Digital_API_KEY       = pit-...     (from your CRM: Settings -> API -> API Key)
+ *   CRM_API_KEY       = pit-...     (from your CRM: Settings -> API -> API Key)
  */
 
 export const config = { maxDuration: 60 };
 
-// --- Types ---
 interface AuditRequest {
   contactId?: string;
   firstName: string;
@@ -28,7 +27,6 @@ interface AuditRequest {
   website: string;
 }
 
-// --- Helper: fetch with timeout ---
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 15000): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -42,7 +40,6 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-// --- Step 1: Fetch page HTML — all 3 proxies tried in parallel ---
 async function fetchPageHtml(target: string): Promise<string | null> {
   const proxies = [
     `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
@@ -63,183 +60,121 @@ async function fetchPageHtml(target: string): Promise<string | null> {
   }
 }
 
-// --- Step 2: Fetch Google PageSpeed Insights data ---
 async function fetchPageSpeedData(target: string): Promise<any | null> {
   const psiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(target)}&strategy=mobile&category=PERFORMANCE&category=SEO&category=BEST_PRACTICES&category=ACCESSIBILITY`;
   try {
     const res = await fetchWithTimeout(psiUrl, {}, 25000);
     const data = await res.json();
     if (data?.lighthouseResult && !data?.error) return data.lighthouseResult;
-  } catch { /* PSI failed */ }
+  } catch {}
   return null;
 }
 
-// --- Step 3: Claude system prompt ---
-const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores, page HTML, or just the URL. Work with whatever you have and provide the most useful analysis possible.
+const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores, page HTML, or just the URL. Work with whatever you have.
 
-Your report must be well-structured, professional, and easy for a non-technical business owner to understand. Include:
+Include:
+1. Executive Summary — 2-3 sentences on overall health and biggest opportunities.
+2. Performance Scores — speed, SEO, best practices, accessibility (0-100). Use PageSpeed data if available; estimate from HTML if not; use general knowledge if only URL available.
+3. Key Issues — 5-10 issues ordered by severity (high/medium/low).
+4. Recommendations — 5-8 concrete, actionable items.
+5. Conversion Opportunities — where the site could better capture leads or book appointments.
 
-1. Executive Summary — 2-3 sentences on the site's overall health and biggest opportunities.
-2. Performance Scores — speed, SEO, best practices, and accessibility scores (0-100). Use actual PageSpeed data if available; estimate from HTML if not; provide general guidance if only the URL is available.
-3. Key Issues — 5-10 specific issues ordered by severity (high/medium/low), each with a clear label and explanation of what's wrong and why it matters.
-4. Recommendations — 5-8 concrete, actionable recommendations the business owner can act on.
-5. Conversion Opportunities — identify areas where the site could better capture leads, book appointments, or convert visitors.
+Rules: never refuse due to limited data. Be honest and specific. Write for a non-technical business owner. Use clean markdown.`;
 
-Rules:
-- Work with whatever data is provided — never refuse to audit due to limited data.
-- If only the URL is available, use your knowledge of common website issues and best practices.
-- Be honest and specific — do not sugarcoat problems.
-- Write in clear, professional language a business owner would understand.
-- Format as clean markdown with headers and bullet points.`;
-
-// --- Step 4: Call Claude API ---
 async function callClaude(target: string, pageSpeed: any | null, html: string | null): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
   const lhScores = pageSpeed
-    ? `Google PageSpeed Insights Scores:
-   - Performance: ${Math.round((pageSpeed.categories?.performance?.score ?? 0) * 100)}/100
-   - SEO: ${Math.round((pageSpeed.categories?.seo?.score ?? 0) * 100)}/100
-   - Best Practices: ${Math.round((pageSpeed.categories?.['best-practices']?.score ?? 0) * 100)}/100
-   - Accessibility: ${Math.round((pageSpeed.categories?.accessibility?.score ?? 0) * 100)}/100
+    ? `PageSpeed Scores:
+- Performance: ${Math.round((pageSpeed.categories?.performance?.score ?? 0) * 100)}/100
+- SEO: ${Math.round((pageSpeed.categories?.seo?.score ?? 0) * 100)}/100
+- Best Practices: ${Math.round((pageSpeed.categories?.['best-practices']?.score ?? 0) * 100)}/100
+- Accessibility: ${Math.round((pageSpeed.categories?.accessibility?.score ?? 0) * 100)}/100
 
-Key PageSpeed Audits:
+Key Audits:
 ${Object.entries(pageSpeed.audits || {})
   .filter(([, a]: any) => a.score !== null && a.score < 0.9 && a.title)
   .slice(0, 15)
-  .map(([key, a]: any) => `   - ${a.title}: score ${Math.round((a.score ?? 0) * 100)}/100${a.numericValue ? ` (${a.displayValue || a.numericValue})` : ''}`)
+  .map(([, a]: any) => `- ${a.title}: ${Math.round((a.score ?? 0) * 100)}/100${a.numericValue ? ` (${a.displayValue || a.numericValue})` : ''}`)
   .join('\n')}`
-    : 'Google PageSpeed Insights data was unavailable. Analyze based on HTML and/or your general knowledge of the site.';
+    : 'PageSpeed data unavailable. Analyze from HTML and general knowledge.';
 
   const htmlSnippet = html
-    ? `Page HTML (truncated to first 8000 chars):\n\`\`\`html\n${html.slice(0, 8000)}\n\`\`\``
-    : 'Page HTML was also unavailable. Perform the audit based on the URL and general website best practices.';
+    ? `Page HTML (first 8000 chars):\n\`\`\`html\n${html.slice(0, 8000)}\n\`\`\``
+    : 'HTML unavailable. Audit based on URL and general best practices.';
 
-  const userMessage = `Please perform a comprehensive website audit for: ${target}\n\n${lhScores}\n\n${htmlSnippet}\n\nProvide your full audit report now.`;
+  const userMessage = `Audit this website: ${target}\n\n${lhScores}\n\n${htmlSnippet}\n\nProvide the full report now.`;
 
-  const response = await fetchWithTimeout(
-    'https://api.anthropic.com/v1/messages',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4000,
-        system: AUDIT_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userMessage }],
-      }),
+  const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
     },
-    30000
-  );
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      system: AUDIT_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userMessage }],
+    }),
+  }, 30000);
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Claude API error ${response.status}: ${errText}`);
-  }
-
+  if (!response.ok) throw new Error(`Claude error ${response.status}: ${await response.text()}`);
   const data = await response.json();
   const text = data?.content?.[0]?.text;
   if (!text) throw new Error('Empty response from Claude');
   return text;
 }
 
-// --- Step 5: Post audit as a CRM note ---
-const CRM_API_BASE = 'https://services.leadconnectorhq.com';
+const CRM_BASE = 'https://services.leadconnectorhq.com';
 
-async function addNoteToContact(contactId: string, auditReport: string, firstName: string, website: string): Promise<void> {
-  const apiKey = process.env.Framework Digital_API_KEY;
-  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
-
-  const noteBody = `AI Website Audit Report — ${website}\n\n${auditReport}\n\n---\nGenerated automatically by Framework Digital's AI audit system for ${firstName}.`;
-
-  const response = await fetchWithTimeout(
-    `${CRM_API_BASE}/contacts/${contactId}/notes`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Version': '2021-07-28',
-      },
-      body: JSON.stringify({ body: noteBody }),
-    },
-    15000
-  );
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`CRM note creation failed ${response.status}: ${errText}`);
-  }
+async function addNoteToContact(contactId: string, report: string, firstName: string, website: string): Promise<void> {
+  const key = process.env.CRM_API_KEY;
+  if (!key) throw new Error('CRM_API_KEY not set');
+  const body = `AI Website Audit — ${website}\n\n${report}\n\n---\nGenerated by Framework Digital AI audit system for ${firstName}.`;
+  const res = await fetchWithTimeout(`${CRM_BASE}/contacts/${contactId}/notes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, 'Version': '2021-07-28' },
+    body: JSON.stringify({ body }),
+  }, 15000);
+  if (!res.ok) throw new Error(`Note failed ${res.status}: ${await res.text()}`);
 }
 
-// --- Step 6: Apply audit-complete tag ---
 async function addTagToContact(contactId: string, tag: string): Promise<void> {
-  const apiKey = process.env.Framework Digital_API_KEY;
-  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
-
-  const response = await fetchWithTimeout(
-    `${CRM_API_BASE}/contacts/${contactId}/tags`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Version': '2021-07-28',
-      },
-      body: JSON.stringify({ tags: [tag] }),
-    },
-    15000
-  );
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`CRM tag application failed ${response.status}: ${errText}`);
-  }
+  const key = process.env.CRM_API_KEY;
+  if (!key) throw new Error('CRM_API_KEY not set');
+  const res = await fetchWithTimeout(`${CRM_BASE}/contacts/${contactId}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, 'Version': '2021-07-28' },
+    body: JSON.stringify({ tags: [tag] }),
+  }, 15000);
+  if (!res.ok) throw new Error(`Tag failed ${res.status}: ${await res.text()}`);
 }
 
-// --- Step 7: Create CRM contact (if no contactId provided) ---
-async function createCRMContact(data: { firstName: string; lastName?: string; email: string; phone?: string; website: string }): Promise<string> {
-  const apiKey = process.env.Framework Digital_API_KEY;
-  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
-
-  const response = await fetchWithTimeout(
-    `${CRM_API_BASE}/contacts/`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Version': '2021-07-28',
-      },
-      body: JSON.stringify({
-        firstName: data.firstName,
-        lastName: data.lastName || '',
-        email: data.email,
-        phone: data.phone || '',
-        website: data.website,
-        locationId: 'OUrWlaebgMJpay1aHLiC',
-      }),
-    },
-    15000
-  );
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`CRM contact creation failed ${response.status}: ${errText}`);
-  }
-
-  const result = await response.json();
-  const contactId = result?.contact?.id || result?.id;
-  if (!contactId) throw new Error('CRM contact creation succeeded but no contactId was returned');
-  return contactId;
+async function createContact(data: { firstName: string; lastName?: string; email: string; phone?: string; website: string }): Promise<string> {
+  const key = process.env.CRM_API_KEY;
+  if (!key) throw new Error('CRM_API_KEY not set');
+  const res = await fetchWithTimeout(`${CRM_BASE}/contacts/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, 'Version': '2021-07-28' },
+    body: JSON.stringify({
+      firstName: data.firstName,
+      lastName: data.lastName || '',
+      email: data.email,
+      phone: data.phone || '',
+      website: data.website,
+      locationId: 'OUrWlaebgMJpay1aHLiC',
+    }),
+  }, 15000);
+  if (!res.ok) throw new Error(`Contact creation failed ${res.status}: ${await res.text()}`);
+  const result = await res.json();
+  const id = result?.contact?.id || result?.id;
+  if (!id) throw new Error('No contactId returned');
+  return id;
 }
 
-// --- Main handler ---
 export default async function handler(req: Request): Promise<Response> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': '*',
@@ -248,70 +183,41 @@ export default async function handler(req: Request): Promise<Response> {
     'Content-Type': 'application/json',
   };
 
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers });
-  }
-
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ success: false, error: 'Method not allowed' }), { status: 405, headers });
-  }
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers });
+  if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers });
 
   try {
-    const rawText = await req.text();
     let body: AuditRequest;
-    try {
-      body = JSON.parse(rawText);
-    } catch {
-      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body' }), { status: 400, headers });
-    }
+    try { body = JSON.parse(await req.text()); }
+    catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers }); }
 
-    const { contactId: passedContactId, firstName, lastName, email, phone, website } = body;
+    const { contactId: passedId, firstName, lastName, email, phone, website } = body;
+    if (!website || !email) return new Response(JSON.stringify({ error: 'email and website required' }), { status: 400, headers });
 
-    if (!website || !email) {
-      return new Response(JSON.stringify({ success: false, error: 'email and website are required' }), { status: 400, headers });
-    }
-
-    let contactId = passedContactId;
+    let contactId = passedId;
     if (!contactId) {
-      console.log(`[Audit] No contactId — creating CRM contact for ${firstName} (${email})...`);
-      contactId = await createCRMContact({ firstName, lastName, email, phone, website });
-      console.log(`[Audit] Contact created: ${contactId}`);
+      console.log(`[Audit] Creating contact for ${email}`);
+      contactId = await createContact({ firstName, lastName, email, phone, website });
     }
 
     let target = website.trim();
     if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
-    console.log(`[Audit] Starting audit for ${firstName} — ${target}`);
-
-    const [html, pageSpeed] = await Promise.all([
-      fetchPageHtml(target),
-      fetchPageSpeedData(target),
-    ]);
-
+    console.log(`[Audit] Starting for ${target}`);
+    const [html, pageSpeed] = await Promise.all([fetchPageHtml(target), fetchPageSpeedData(target)]);
     console.log(`[Audit] HTML: ${html ? 'yes' : 'no'} | PageSpeed: ${pageSpeed ? 'yes' : 'no'}`);
 
-    console.log('[Audit] Calling Claude...');
-    const auditReport = await callClaude(target, pageSpeed, html);
-    console.log('[Audit] Claude done, length:', auditReport.length);
+    const report = await callClaude(target, pageSpeed, html);
+    console.log(`[Audit] Claude done (${report.length} chars)`);
 
-    await addNoteToContact(contactId, auditReport, firstName, target);
-    console.log('[Audit] Note posted.');
-
+    await addNoteToContact(contactId, report, firstName, target);
     await addTagToContact(contactId, 'audit-complete');
-    console.log('[Audit] Tag applied.');
+    console.log('[Audit] Done.');
 
-    return new Response(JSON.stringify({
-      success: true,
-      message: 'Audit complete.',
-      contactId,
-      website: target,
-    }), { status: 200, headers });
+    return new Response(JSON.stringify({ success: true, contactId, website: target }), { status: 200, headers });
 
   } catch (error: any) {
-    console.error('[Audit] Error:', error.message);
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message || 'Unexpected error during audit.',
-    }), { status: 500, headers });
+    console.error('[Audit]', error.message);
+    return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers });
   }
 }
