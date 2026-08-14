@@ -97,24 +97,25 @@ async function createContact(data: { firstName: string; lastName?: string; email
   return id;
 }
 
-export default async function handler(req: Request): Promise<Response> {
-  const headers: Record<string, string> = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json',
-  };
+const corsHeaders: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Content-Type': 'application/json',
+};
 
-  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers });
-  if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers });
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, { status: 204, headers: corsHeaders });
+}
 
+export async function POST(req: Request): Promise<Response> {
   try {
     let body: AuditRequest;
     try { body = JSON.parse(await req.text()); }
-    catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers }); }
+    catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: corsHeaders }); }
 
     const { contactId: passedId, firstName, lastName, email, phone, website } = body;
-    if (!website || !email) return new Response(JSON.stringify({ error: 'email and website required' }), { status: 400, headers });
+    if (!website || !email) return new Response(JSON.stringify({ error: 'email and website required' }), { status: 400, headers: corsHeaders });
 
     let contactId = passedId;
     if (!contactId) {
@@ -132,10 +133,10 @@ export default async function handler(req: Request): Promise<Response> {
     await addTagToContact(contactId, 'audit-complete');
     console.log('[Audit] Complete.');
 
-    return new Response(JSON.stringify({ success: true, contactId, website: target }), { status: 200, headers });
+    return new Response(JSON.stringify({ success: true, contactId, website: target }), { status: 200, headers: corsHeaders });
 
   } catch (error: any) {
     console.error('[Audit] ERROR:', error.message);
-    return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers });
+    return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: corsHeaders });
   }
 }
