@@ -1,20 +1,19 @@
 /**
-* Serverless Function: Claude-Powered Website Audit (Standalone)
+ * Serverless Function: Claude-Powered Website Audit (Standalone)
  *
  * Flow:
  *   1. Receives { contactId?, firstName, lastName?, email, phone?, website } via POST
- *   2. If no contactId, creates a CRM contact using GHL_API_KEY
- *   3. Fetches the website's HTML (GET request through CORS proxy)
- *   4. Calls Google PageSpeed Insights API (free, no key needed)
- *   5. Sends HTML + PageSpeed data to Claude (Anthropic API) with ANTHROPIC_API_KEY
- *   6. Takes Claude's response and POSTs it to the CRM as a note on the contact
- *      using contactId and GHL_API_KEY
- *   7. Applies the "audit-complete" tag to the CRM contact
+ *   2. If no contactId, creates a CRM contact using Framework Digital_API_KEY
+ *   3. Attempts to fetch website HTML in parallel across 3 proxies (optional)
+ *   4. Attempts Google PageSpeed Insights API (optional)
+ *   5. Sends whatever data is available to Claude — always proceeds
+ *   6. Posts Claude's report as a note on the CRM contact
+ *   7. Applies the "audit-complete" tag to the contact
  *   8. Returns 200 success
  *
  * === ENVIRONMENT VARIABLES (set on Vercel) ===
  *   ANTHROPIC_API_KEY = sk-ant-...  (from https://console.anthropic.com)
- *   GHL_API_KEY       = pit-...     (from your CRM: Settings → API → API Key)
+ *   Framework Digital_API_KEY       = pit-...     (from your CRM: Settings → API → API Key)
  */
 
 export const config = { maxDuration: 60 };
@@ -43,21 +42,25 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-// ─── Step 1: Fetch page HTML through CORS proxy ──────────────────────
+// ─── Step 1: Fetch page HTML — all 3 proxies tried in parallel ───────
 async function fetchPageHtml(target: string): Promise<string | null> {
   const proxies = [
     `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
     `https://corsproxy.io/?url=${encodeURIComponent(target)}`,
     `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(target)}`,
   ];
-  for (const proxy of proxies) {
-    try {
-      const res = await fetchWithTimeout(proxy, {}, 10000);
-      const html = await res.text();
-      if (html && html.length > 200) return html;
-    } catch { /* try next */ }
+  try {
+    return await Promise.any(
+      proxies.map(async (proxy) => {
+        const res = await fetchWithTimeout(proxy, {}, 10000);
+        const html = await res.text();
+        if (!html || html.length < 200) throw new Error('Too short');
+        return html;
+      })
+    );
+  } catch {
+    return null;
   }
-  return null;
 }
 
 // ─── Step 2: Fetch Google PageSpeed Insights data (free, no key) ─────
@@ -71,19 +74,20 @@ async function fetchPageSpeedData(target: string): Promise<any | null> {
   return null;
 }
 
-// ─── Step 3: Build the Claude system prompt ───────────────────────────
-const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive Google PageSpeed Insights data and the page HTML. Analyze them and provide a comprehensive, actionable audit report.
+// ─── Step 3: Claude system prompt ────────────────────────────────────
+const AUDIT_SYSTEM_PROMPT = `You are a senior SEO and web performance consultant performing a professional website audit for a potential client. You will receive whatever data is available — which may include Google PageSpeed Insights scores, page HTML, or just the URL. Work with whatever you have and provide the most useful analysis possible.
 
 Your report must be well-structured, professional, and easy for a non-technical business owner to understand. Include:
 
 1. Executive Summary — 2-3 sentences on the site's overall health and biggest opportunities.
-2. Performance Scores — speed, SEO, best practices, and accessibility scores (0-100).
+2. Performance Scores — speed, SEO, best practices, and accessibility scores (0-100). Use actual PageSpeed data if available; estimate from HTML if not; provide general guidance if only the URL is available.
 3. Key Issues — 5-10 specific issues ordered by severity (high/medium/low), each with a clear label and explanation of what's wrong and why it matters.
 4. Recommendations — 5-8 concrete, actionable recommendations the business owner can act on.
 5. Conversion Opportunities — identify areas where the site could better capture leads, book appointments, or convert visitors.
 
 Rules:
-- Base scores on the actual PageSpeed data when available. If unavailable, derive scores from the HTML analysis.
+- Work with whatever data is provided — never refuse to audit due to limited data.
+- If only the URL is available, use your knowledge of common website issues and best practices.
 - Be honest and specific — do not sugarcoat problems.
 - Write in clear, professional language a business owner would understand.
 - Format as clean markdown with headers and bullet points.`;
@@ -106,22 +110,13 @@ ${Object.entries(pageSpeed.audits || {})
   .slice(0, 15)
   .map(([key, a]: any) => `   - ${a.title}: score ${Math.round((a.score ?? 0) * 100)}/100${a.numericValue ? ` (${a.displayValue || a.numericValue})` : ''}`)
   .join('\n')}`
-    : 'Google PageSpeed Insights data was unavailable for this URL.';
+    : 'Google PageSpeed Insights data was unavailable. Analyze based on HTML and/or your general knowledge of the site.';
 
   const htmlSnippet = html
-    ? `Page HTML (truncated to first 8000 chars for analysis):
-\`\`\`html
-${html.slice(0, 8000)}
-\`\`\``
-    : 'Page HTML was unavailable for this URL. Analyze based on PageSpeed data only.';
+    ? `Page HTML (truncated to first 8000 chars):\n\`\`\`html\n${html.slice(0, 8000)}\n\`\`\``
+    : 'Page HTML was also unavailable. Perform the audit based on the URL and general website best practices.';
 
-  const userMessage = `Please perform a comprehensive website audit for: ${target}
-
-${lhScores}
-
-${htmlSnippet}
-
-Provide your full audit report now.`;
+  const userMessage = `Please perform a comprehensive website audit for: ${target}\n\n${lhScores}\n\n${htmlSnippet}\n\nProvide your full audit report now.`;
 
   const response = await fetchWithTimeout(
     'https://api.anthropic.com/v1/messages',
@@ -136,9 +131,7 @@ Provide your full audit report now.`;
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4000,
         system: AUDIT_SYSTEM_PROMPT,
-        messages: [
-          { role: 'user', content: userMessage }
-        ],
+        messages: [{ role: 'user', content: userMessage }],
       }),
     },
     30000
@@ -155,19 +148,14 @@ Provide your full audit report now.`;
   return text;
 }
 
-// ─── Step 5: POST Claude's audit as a note on the CRM contact ────────
+// ─── Step 5: Post audit as a CRM note ────────────────────────────────
 const CRM_API_BASE = 'https://services.leadconnectorhq.com';
 
 async function addNoteToContact(contactId: string, auditReport: string, firstName: string, website: string): Promise<void> {
-  const apiKey = process.env.GHL_API_KEY;
-  if (!apiKey) throw new Error('GHL_API_KEY environment variable is not set');
+  const apiKey = process.env.Framework Digital_API_KEY;
+  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
 
-  const noteBody = `📋 AI Website Audit Report — ${website}
-
-${auditReport}
-
----
-This audit was generated automatically by Framework Digital's AI audit system for ${firstName}.`;
+  const noteBody = `🔍 AI Website Audit Report — ${website}\n\n${auditReport}\n\n---\nGenerated automatically by Framework Digital's AI audit system for ${firstName}.`;
 
   const response = await fetchWithTimeout(
     `${CRM_API_BASE}/contacts/${contactId}/notes`,
@@ -178,9 +166,7 @@ This audit was generated automatically by Framework Digital's AI audit system fo
         'Authorization': `Bearer ${apiKey}`,
         'Version': '2021-07-28',
       },
-      body: JSON.stringify({
-        body: noteBody,
-      }),
+      body: JSON.stringify({ body: noteBody }),
     },
     15000
   );
@@ -191,10 +177,10 @@ This audit was generated automatically by Framework Digital's AI audit system fo
   }
 }
 
-// ─── Step 6: Apply the "audit-complete" tag to the CRM contact ───────
+// ─── Step 6: Apply audit-complete tag ────────────────────────────────
 async function addTagToContact(contactId: string, tag: string): Promise<void> {
-  const apiKey = process.env.GHL_API_KEY;
-  if (!apiKey) throw new Error('GHL_API_KEY environment variable is not set');
+  const apiKey = process.env.Framework Digital_API_KEY;
+  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
 
   const response = await fetchWithTimeout(
     `${CRM_API_BASE}/contacts/${contactId}/tags`,
@@ -205,9 +191,7 @@ async function addTagToContact(contactId: string, tag: string): Promise<void> {
         'Authorization': `Bearer ${apiKey}`,
         'Version': '2021-07-28',
       },
-      body: JSON.stringify({
-        tags: [tag],
-      }),
+      body: JSON.stringify({ tags: [tag] }),
     },
     15000
   );
@@ -218,10 +202,10 @@ async function addTagToContact(contactId: string, tag: string): Promise<void> {
   }
 }
 
-// ─── Step 7: Create a CRM contact (if no contactId provided) ─────────
+// ─── Step 7: Create CRM contact (if no contactId provided) ───────────
 async function createCRMContact(data: { firstName: string; lastName?: string; email: string; phone?: string; website: string }): Promise<string> {
-  const apiKey = process.env.GHL_API_KEY;
-  if (!apiKey) throw new Error('GHL_API_KEY environment variable is not set');
+  const apiKey = process.env.Framework Digital_API_KEY;
+  if (!apiKey) throw new Error('Framework Digital_API_KEY environment variable is not set');
 
   const response = await fetchWithTimeout(
     `${CRM_API_BASE}/contacts/`,
@@ -238,6 +222,7 @@ async function createCRMContact(data: { firstName: string; lastName?: string; em
         email: data.email,
         phone: data.phone || '',
         website: data.website,
+        locationId: 'OUrWlaebgMJpay1aHLiC',
       }),
     },
     15000
@@ -254,7 +239,7 @@ async function createCRMContact(data: { firstName: string; lastName?: string; em
   return contactId;
 }
 
-// ─── Main handler (Vercel Edge Function) ──────────────────────────────
+// ─── Main handler ─────────────────────────────────────────────────────
 export default async function handler(req: Request): Promise<Response> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': '*',
@@ -263,7 +248,6 @@ export default async function handler(req: Request): Promise<Response> {
     'Content-Type': 'application/json',
   };
 
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers });
   }
@@ -284,57 +268,42 @@ export default async function handler(req: Request): Promise<Response> {
     const { contactId: passedContactId, firstName, lastName, email, phone, website } = body;
 
     if (!website || !email) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'email and website are required',
-      }), { status: 400, headers });
+      return new Response(JSON.stringify({ success: false, error: 'email and website are required' }), { status: 400, headers });
     }
 
-    // Create a CRM contact if no contactId was provided, otherwise use the passed one
     let contactId = passedContactId;
     if (!contactId) {
-      console.log(`[Audit] No contactId provided — creating CRM contact for ${firstName} (${email})...`);
+      console.log(`[Audit] No contactId — creating CRM contact for ${firstName} (${email})...`);
       contactId = await createCRMContact({ firstName, lastName, email, phone, website });
-      console.log(`[Audit] CRM contact created: ${contactId}`);
+      console.log(`[Audit] Contact created: ${contactId}`);
     }
 
-    console.log(`[Audit] Starting audit for ${firstName} (${email}) — website: ${website}`);
-
-    // Normalize URL
     let target = website.trim();
     if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
-    // Fetch HTML and PageSpeed data in parallel
+    console.log(`[Audit] Starting audit for ${firstName} — ${target}`);
+
+    // Both are optional — always proceeds regardless of outcome
     const [html, pageSpeed] = await Promise.all([
       fetchPageHtml(target),
       fetchPageSpeedData(target),
     ]);
 
-    if (!html && !pageSpeed) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Unable to retrieve any data for this URL. Please check the URL and try again.',
-      }), { status: 502, headers });
-    }
+    console.log(`[Audit] HTML: ${html ? 'yes' : 'no'} | PageSpeed: ${pageSpeed ? 'yes' : 'no'}`);
 
-    // Call Claude with the data
-    console.log('[Audit] Calling Claude API...');
+    console.log('[Audit] Calling Claude...');
     const auditReport = await callClaude(target, pageSpeed, html);
-    console.log('[Audit] Claude response received, length:', auditReport.length);
+    console.log('[Audit] Claude done, length:', auditReport.length);
 
-    // POST the audit as a note on the CRM contact
-    console.log(`[Audit] Posting audit note to CRM contact ${contactId}...`);
     await addNoteToContact(contactId, auditReport, firstName, target);
-    console.log('[Audit] Note posted to CRM successfully.');
+    console.log('[Audit] Note posted.');
 
-    // Apply the "audit-complete" tag to the contact
-    console.log(`[Audit] Applying "audit-complete" tag to contact ${contactId}...`);
     await addTagToContact(contactId, 'audit-complete');
-    console.log('[Audit] Tag applied successfully.');
+    console.log('[Audit] Tag applied.');
 
     return new Response(JSON.stringify({
       success: true,
-      message: 'Audit completed and note added to contact.',
+      message: 'Audit complete.',
       contactId,
       website: target,
     }), { status: 200, headers });
@@ -343,7 +312,7 @@ export default async function handler(req: Request): Promise<Response> {
     console.error('[Audit] Error:', error.message);
     return new Response(JSON.stringify({
       success: false,
-      error: error.message || 'An unexpected error occurred during the audit.',
+      error: error.message || 'Unexpected error during audit.',
     }), { status: 500, headers });
   }
 }
